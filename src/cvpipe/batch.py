@@ -7,7 +7,7 @@ from src.cvpipe.extract import extract_frames
 from src.cvpipe.ingest import ingest
 from src.cvpipe.normalize import normalize_video
 
-EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"}
+EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".mpg", ".mpeg", ".ts", ".wmv", ".flv"}
 
 
 def run_batch(input_dir, out_root="data/processed/frames", force=False):
