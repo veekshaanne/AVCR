@@ -1,3 +1,4 @@
 resize_short_side: 256
 crop_size: 256
 batch_size: 8
+degrade_prob: 0.7

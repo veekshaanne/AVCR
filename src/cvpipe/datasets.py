@@ -7,10 +7,14 @@ import torch
 from torch.utils.data import Dataset
 
 from src.cvpipe.color_utils import rgb_to_model_input_target
+from src.cvpipe.degrade import Degrader
 
 
 class FrameDataset(Dataset):
     """Single-frame dataset for the U-Net baseline.
+
+    degrade_prob: chance (0..1) that a sample's L channel gets old-film
+    damage. The ab target is always taken from the clean frame.
 
     Returns:
         L    : float32 tensor (1, H, W), range [-1, 1]
@@ -19,7 +23,7 @@ class FrameDataset(Dataset):
     """
 
     def __init__(self, manifest_paths, train=True,
-                 resize_short_side=256, crop_size=256):
+                 resize_short_side=256, crop_size=256, degrade_prob=0.0):
         if isinstance(manifest_paths, str):
             manifest_paths = [manifest_paths]
         self.df = pd.concat([pd.read_parquet(p) for p in manifest_paths],
@@ -27,6 +31,8 @@ class FrameDataset(Dataset):
         self.train = train
         self.short = resize_short_side
         self.crop = crop_size
+        self.degrade_prob = degrade_prob
+        self.degrader = Degrader() if degrade_prob > 0 else None
 
     def __len__(self):
         return len(self.df)
@@ -55,6 +61,12 @@ class FrameDataset(Dataset):
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         rgb = self._crop(self._resize(rgb))
         L, ab = rgb_to_model_input_target(rgb)
+
+        if self.degrader is not None:
+            rng = np.random.default_rng()  # fresh randomness per sample
+            if rng.random() < self.degrade_prob:
+                L = self.degrader(L, rng=rng)
+
         meta = {"video_id": row["video_id"],
                 "scene_id": int(row["scene_id"]),
                 "frame_idx": int(row["frame_idx"])}
