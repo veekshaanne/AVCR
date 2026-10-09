@@ -2,3 +2,5 @@ resize_short_side: 256
 crop_size: 256
 batch_size: 8
 degrade_prob: 0.7
+clip_len: 5
+stride: 1
