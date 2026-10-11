@@ -142,6 +142,89 @@ resolution. For DAVIS, nothing is copied: the manifest points to the original JP
 interlacing, audio info, and the model input sizes (`model_resize`, `model_padded`).
 `scenes.json` lists where each scene starts and ends.
 
+## For the Model Team
+
+The dataset already provides everything needed for training: a black-and-white input
+and the matching true color for every sample. No conversion is required on the model
+side.
+
+### What the dataset provides
+
+| Item | Shape | Range | Meaning |
+|---|---|---|---|
+| `L` | `(batch, 1, 256, 256)` | [-1, 1] | Black-and-white input (brightness) |
+| `ab` | `(batch, 2, 256, 256)` | about [-1, 1] | True color, the training target |
+
+### What the model must do
+
+- Take `L` and output a predicted `ab` with the same shape as the target.
+- End with a `tanh` activation, so the output stays in [-1, 1].
+- Handle the VGG16 input requirements internally (map `L` back to [0, 1], repeat it to
+  3 channels, apply ImageNet mean/std). The dataset does not do this.
+- Stay fully convolutional. Training uses 256x256 crops, while inference uses full
+  frames padded to a multiple of 32.
+
+### Training
+
+```python
+from torch.utils.data import DataLoader
+from src.cvpipe.datasets import FrameDataset
+
+train = DataLoader(FrameDataset("data/splits/train.parquet", train=True, degrade_prob=0.7),
+                   batch_size=8, shuffle=True)
+val = DataLoader(FrameDataset("data/splits/val.parquet", train=False), batch_size=8)
+
+for L, ab_true, meta in train:
+    ab_pred = model(L)
+    loss = (ab_pred - ab_true).abs().mean()    # L1 loss; other losses can be added
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+```
+
+Use `train=False` for validation and test data, which gives a fixed center crop instead of
+a random one. For models that need consecutive frames, use `ClipDataset` (see the
+Dataset & DataLoader API section).
+
+### Viewing a colorized result
+
+Combine the original brightness with the predicted color:
+
+```python
+from src.cvpipe.color_utils import model_output_to_rgb
+
+L, ab_true, _ = next(iter(val))
+ab_pred = model(L)
+rgb = model_output_to_rgb(L[0].permute(1, 2, 0).numpy(),
+                          ab_pred[0].permute(1, 2, 0).detach().numpy())
+# rgb: (256, 256, 3), float32, range [0, 1]
+```
+
+### Colorizing a real black-and-white video
+
+The helpers in `src/cvpipe/reconstruct.py` handle the resizing, padding and merging.
+`iter_frame_chunks` in `src/cvpipe/stream.py` reads a video a few frames at a time.
+
+```python
+import torch
+from src.cvpipe.ingest import build_meta
+from src.cvpipe.reconstruct import prepare_input, reconstruct_frame
+
+meta = build_meta("film.mp4")
+resize, padded = meta["model_resize"], meta["model_padded"]
+
+# rgb: one frame, float32 RGB in [0, 1], shape (H, W, 3)
+L = prepare_input(rgb, resize, padded)                    # (H_pad, W_pad, 1)
+x = torch.from_numpy(L).permute(2, 0, 1)[None]            # (1, 1, H_pad, W_pad)
+with torch.no_grad():
+    ab = model(x)[0].permute(1, 2, 0).cpu().numpy()       # (H_pad, W_pad, 2)
+rgb_out = reconstruct_frame(rgb, ab, resize)              # (H, W, 3), range [0, 1]
+```
+
+`reconstruct_frame` removes the padding, enlarges `ab` to the original size, and merges it
+with the original full-resolution brightness, so the output keeps the sharpness of the
+source frame.
+
 ## Train/val/test split
 
 Splits are made by video, never by frame, because neighboring frames look almost
