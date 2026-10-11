@@ -50,20 +50,13 @@ Always run commands from the repo root, because the manifests store relative pat
 ### Option A: DAVIS (real color videos, good for first runs)
 
 ```bash
-mkdir -p data/external && cd data/external
-wget https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip
-unzip -q DAVIS-2017-trainval-480p.zip
-cd ../..
-
-# build manifests (one per sequence, plus one combined)
-python -m src.cvpipe.import_frames data/external/DAVIS/JPEGImages/480p
-
-# create the shared train/val/test split
-python -m src.cvpipe.apply_splits configs/splits_davis.json data/processed/frames/davis_manifest.parquet
+sudo apt install -y wget unzip     # if not already installed
+bash scripts/setup_davis.sh
 ```
 
-This produces `data/splits/train.parquet`, `val.parquet` and `test.parquet`
-(72, 9 and 9 videos).
+This downloads DAVIS (about 800 MB), builds the manifests, creates the shared
+train/val/test split, and runs a check. When it finishes, `data/splits/` contains
+`train.parquet`, `val.parquet` and `test.parquet`.
 
 ### Option B: your own videos
 
