@@ -1,277 +1,217 @@
 # Video Colorization: Data Pipeline
 
-## Prerequisites & System Requirements
+The data side of the AI video colorization and restoration project. This code turns
+raw videos into training-ready tensors, and turns the model's predicted colors back
+into finished frames.
 
-- **Operating System:** Linux (Ubuntu 20.04+ recommended) or WSL (Windows Subsystem for Linux)
-- **Python:** Version 3.11
-- **System Binaries:** `ffmpeg` and `ffprobe` installed and accessible via `PATH`
+The model, temporal smoothing, super-resolution and evaluation are handled by other
+team members. This repo gives them clean, tested inputs and outputs.
 
----
+## How it works
 
-## Installation & Verification
+Old black-and-white video has brightness but no color. Every frame is split into two
+parts using the LAB color space:
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repo-url>
-   cd colorize-cv
+- **L**: brightness (this is what a black-and-white frame already contains)
+- **ab**: color
+
+The model takes **L** and predicts **ab**. For training, modern color videos are used:
+the color is removed to make fake black-and-white inputs, and the real color is kept
+as the answer. To make those inputs resemble real old film, grain, scratches, dust,
+blur and fading are added to **L** (never to the answer).
 
 ```
+video -> frames -> L (input) + ab (answer) -> model -> predicted ab -> color frames
+```
 
-2. **Set up virtual environment using `uv`:**
+## Requirements
+
+- Ubuntu or WSL (any Linux works)
+- Python 3.11
+- `ffmpeg` and `ffprobe` on the PATH
+
+## Installation
+
 ```bash
+git clone <repo-url>
+cd colorize-cv
 uv venv --python 3.11 .venv
 source .venv/bin/activate
 uv pip install -r requirements.txt
-
-```
-
-
-3. **Verify installation:**
-```bash
 python -m pytest tests/ -q
-
 ```
 
+The last command should print `8 passed`.
 
-*Expected output:* `8 passed`
+Always run commands from the repo root, because the manifests store relative paths.
 
-> **Note:** All scripts and modules must be executed from the repository root to ensure relative paths inside Parquet manifests resolve correctly.
+## Quick start
 
----
+### Option A: DAVIS (real color videos, good for first runs)
 
-## Quick Start
-
-### Option A: DAVIS Dataset (Recommended for First Runs)
-
-The DAVIS 2017 480p dataset consists of high-quality color video sequences, ideal for establishing training baselines.
-
-1. **Download and extract DAVIS:**
 ```bash
 mkdir -p data/external && cd data/external
-wget [https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip](https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip)
+wget https://data.vision.ee.ethz.ch/csergi/share/davis/DAVIS-2017-trainval-480p.zip
 unzip -q DAVIS-2017-trainval-480p.zip
 cd ../..
 
-```
-
-
-2. **Generate sequence manifests:**
-```bash
+# build manifests (one per sequence, plus one combined)
 python -m src.cvpipe.import_frames data/external/DAVIS/JPEGImages/480p
 
-```
-
-
-3. **Apply reproducible splits:**
-```bash
+# create the shared train/val/test split
 python -m src.cvpipe.apply_splits configs/splits_davis.json data/processed/frames/davis_manifest.parquet
-
 ```
 
+This produces `data/splits/train.parquet`, `val.parquet` and `test.parquet`
+(72, 9 and 9 videos).
 
-This generates `data/splits/train.parquet` (72 videos), `val.parquet` (9 videos), and `test.parquet` (9 videos).
+### Option B: your own videos
 
----
-
-### Option B: Processing Custom Raw Videos
-
-Place video files (`.mp4`, `.mkv`, `.avi`, etc.) inside `data/raw/` and execute the batch ingestion pipeline:
+Put video files in `data/raw/`, then run:
 
 ```bash
 python -m src.cvpipe.batch data/raw
-
 ```
 
-**Automated operations per video:**
+For each video this reads its details, fixes interlacing and variable frame rate
+if needed, finds scene cuts, saves every frame as a PNG, and writes manifests.
 
-1. Probes video attributes via `ffprobe`.
-2. Normalizes interlacing and variable frame rates (VFR) to constant frame rates (CFR).
-3. Performs scene cut detection.
-4. Extracts full-resolution PNG frames into `data/processed/frames/<video_id>/<scene_id>/`.
-5. Builds and writes Parquet manifests.
-
----
-
-## Data Conventions & Specifications
-
-### Color Space & Normalization
-
-All color conversions use `src/cvpipe/color_utils.py`. **Do not use OpenCV’s native 8-bit LAB conversion (`cv2.COLOR_BGR2LAB`)**, which clamps and quantizes values differently.
-
-| Component | Target Format & Range | Shape | Notes |
-| --- | --- | --- | --- |
-| **RGB Image** | `float32`, range $[0.0, 1.0]$ | $(H, W, 3)$ | Base image representation |
-| **$L$ Channel** | `float32`, range $[-1.0, 1.0]$ | $(1, H, W)$ | Normalized as: $(L / 50.0) - 1.0$ |
-| **$ab$ Channels** | `float32`, range $\approx [-1.0, 1.0]$ | $(2, H, W)$ | Normalized as: $ab / 128.0$ |
-
-> **Model Input Formatting:** Converting $L$ back to ImageNet standards for pretrained backbones (e.g., repeating across 3 channels, applying Mean/Std normalization for VGG16) must be performed inside the model's `forward()` pass or wrapper, **not** inside dataset loaders.
-
----
-
-### Manifest Schema
-
-Frame metadata is stored in Apache Parquet format at `data/processed/frames/<video_id>/manifest.parquet` (and aggregated in `data/splits/*.parquet`).
-
-| Column Name | Data Type | Description |
-| --- | --- | --- |
-| `video_id` | `string` | Unique identifier / video name |
-| `scene_id` | `int32` / `string` | Zero-indexed shot/scene number within the video |
-| `frame_idx` | `int32` | Sequential frame index within the video |
-| `timestamp` | `float64` | Frame presentation timestamp in seconds |
-| `width` | `int32` | Original frame width in pixels |
-| `height` | `int32` | Original frame height in pixels |
-| `path` | `string` | Relative filepath to stored image (`.png` or external `.jpg`) |
-
----
-
-### Metadata Schema
-
-Stored at `data/interim/<video_id>/video_meta.json`:
-
-* Video spatial dimensions (`width`, `height`)
-* Frame rate (`fps`), duration, container/codec details
-* Interlacing flags, audio channel info
-* Model input parameters: `model_resize` and `model_padded`
-* `scenes.json`: Boundaries (start/end frame indices) for detected scenes.
-
----
-
-## Dataset & DataLoader API
-
-### FrameDataset
-
-For single-frame colorization models.
+## Using the data in training
 
 ```python
 from torch.utils.data import DataLoader
 from src.cvpipe.datasets import FrameDataset
 
-ds = FrameDataset(
-    manifest_path="data/splits/train.parquet",
-    train=True,           # True: random crops; False: center crops
-    degrade_prob=0.7      # 70% chance to apply film degradation (grain, scratches, blur)
-)
-
+ds = FrameDataset("data/splits/train.parquet", train=True, degrade_prob=0.7)
 loader = DataLoader(ds, batch_size=8, shuffle=True, num_workers=4)
 
 for L, ab, meta in loader:
-    # L:    torch.Tensor of shape (8, 1, 256, 256), range [-1, 1]
-    # ab:   torch.Tensor of shape (8, 2, 256, 256), range approx [-1, 1]
-    # meta: dict containing frame paths, video_id, and frame_idx
+    # L:  (8, 1, 256, 256)  input, range [-1, 1]
+    # ab: (8, 2, 256, 256)  target, range about [-1, 1]
     ...
-
 ```
 
----
-
-### ClipDataset
-
-For temporal or multi-frame models requiring sequence continuity (e.g., 3D-CNNs, Recurrent Networks, or Transformers).
+For models that need several consecutive frames:
 
 ```python
-from torch.utils.data import DataLoader
 from src.cvpipe.clips import ClipDataset
 
-ds = ClipDataset(
-    manifest_path="data/splits/train.parquet",
-    clip_len=5,           # Number of consecutive frames per clip
-    stride=1,             # Frame step stride
-    train=True,
-    degrade_prob=0.7
-)
-
-loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=4)
-
-for L_seq, ab_seq, meta in loader:
-    # L_seq:  torch.Tensor of shape (4, 5, 1, 256, 256)
-    # ab_seq: torch.Tensor of shape (4, 5, 2, 256, 256)
-    ...
-
+ds = ClipDataset("data/splits/train.parquet", clip_len=5, stride=1,
+                 train=True, degrade_prob=0.7)
+# each item: L_seq (5, 1, 256, 256), ab_seq (5, 2, 256, 256), meta
 ```
 
-#### Clip Rules:
+| Option | Meaning |
+|---|---|
+| `train` | `True`: random crop. `False`: center crop (use for val/test) |
+| `degrade_prob` | Chance (0 to 1) that a sample's L gets old-film damage |
+| `clip_len`, `stride` | Frames per clip, and the gap between them |
 
-* Clips **never** cross scene cuts or video boundaries.
-* All frames within a single clip share the exact same spatial crop coordinates to maintain spatial coherence.
+A clip never crosses a scene cut or a video boundary, and all frames in a clip use
+the same crop.
 
----
+## Data format
 
-## Train / Val / Test Split Strategy
+### Color conventions
 
-To prevent data leakage caused by highly redundant consecutive video frames:
+All code must use `src/cvpipe/color_utils.py` for color conversion. OpenCV's 8-bit
+LAB should not be used.
 
-1. **Primary Strategy:** Splits are performed strictly at the **video level** with an **80 / 10 / 10** ratio (Random Seed `42`).
-2. **Fallback Strategy:** If the total count of available videos is $< 5$, the splitter automatically falls back to splitting at the **scene level** and issues a log warning.
-3. **Reproducibility:** DAVIS split definitions are committed in `configs/splits_davis.json`.
+| Item | Format |
+|---|---|
+| RGB image | float32, range [0, 1], shape (H, W, 3) |
+| Model input `L` | `L / 50 - 1`, range [-1, 1] |
+| Model target `ab` | `ab / 128`, range about [-1, 1] |
 
----
+Preparing `L` for the pretrained VGG16 (mapping back to [0, 1], repeating to 3
+channels, ImageNet normalization) belongs inside the model, not in the dataset.
 
-## Inference & Frame Reconstruction
+### Manifest
 
-To reconstruct colorized videos without losing original resolution or detail, predicted $ab$ channels are upscaled to native resolution and merged with the original, un-degraded $L$ channel.
+Each video has `data/processed/frames/<video_id>/manifest.parquet` with one row per
+frame:
+
+| Column | Meaning |
+|---|---|
+| `video_id` | Video name |
+| `scene_id` | Shot number within the video |
+| `frame_idx` | Frame number in the video |
+| `timestamp` | Seconds from the start |
+| `width`, `height` | Original frame size |
+| `path` | Path to the image file |
+
+Frames from video files are saved as `<video_id>/<scene_id>/<frame_idx>.png` at full
+resolution. For DAVIS, nothing is copied: the manifest points to the original JPEGs.
+
+### Video info
+
+`data/interim/<video_id>/video_meta.json` stores the size, fps, duration, codec,
+interlacing, audio info, and the model input sizes (`model_resize`, `model_padded`).
+`scenes.json` lists where each scene starts and ends.
+
+## Train/val/test split
+
+Splits are made by video, never by frame, because neighboring frames look almost
+identical and would leak between sets. The seed is 42 and the ratio is 80/10/10.
+When fewer than 5 videos exist, the split falls back to scenes and prints a warning
+(fine for tests, not for real data).
+
+The DAVIS split list is committed at `configs/splits_davis.json`, so every run uses
+the same videos.
+
+## Running a trained model on a video
 
 ```python
-import numpy as np
-import torch
 from src.cvpipe.ingest import build_meta
 from src.cvpipe.reconstruct import prepare_input, reconstruct_frame
 
-# 1. Probe meta parameters for padding and alignment
 meta = build_meta("my_video.mp4")
 resize, padded = meta["model_resize"], meta["model_padded"]
 
-# 2. Extract and prepare input tensor from full-res RGB/Grayscale frame
-L_input = prepare_input(rgb_frame, resize, padded)  # Returns (H_pad, W_pad, 1) in range [-1, 1]
-
-# 3. Model Forward Pass
-# ab_pred shape: (H_pad, W_pad, 2) in range [-1, 1]
-ab_pred = model(L_input)
-
-# Convert Torch Tensor to Numpy array if needed
-if isinstance(ab_pred, torch.Tensor):
-    ab_pred = ab_pred.permute(1, 2, 0).detach().cpu().numpy()
-
-# 4. Reconstruct original resolution colorized frame
-rgb_out = reconstruct_frame(rgb_frame, ab_pred, resize)  # Full-resolution RGB image in [0.0, 1.0]
-
+L = prepare_input(rgb, resize, padded)        # (H_pad, W_pad, 1) in [-1, 1]
+ab = model(L)                                  # (H_pad, W_pad, 2) in [-1, 1]
+rgb_out = reconstruct_frame(rgb, ab, resize)  # full-size color frame, [0, 1]
 ```
 
-> **Streaming Large Videos:** For memory-efficient processing of long-form video files without loading full streams into RAM, use `iter_frame_chunks(video_path, chunk_size)` from `src/cvpipe/stream.py`.
+`reconstruct_frame` removes the padding, enlarges `ab` to the original size, and
+combines it with the original full-resolution L, so brightness and sharpness stay as
+sharp as the source. If the model returns a torch tensor of shape (2, H, W), convert
+it first with `.permute(1, 2, 0).cpu().numpy()`.
 
----
+For long videos, `iter_frame_chunks(video_path, chunk_size)` in `stream.py` reads a
+few frames at a time instead of loading the whole film.
 
-## Project Directory & Module Architecture
-
-```
-colorize-cv/
-├── src/
-│   └── cvpipe/
-│       ├── ingest.py         # Probe video attributes via ffprobe
-│       ├── scenes.py         # Scene cut detection algorithms
-│       ├── extract.py        # Frame extraction & parquet manifest creation
-│       ├── normalize.py      # Deinterlacing & VFR to CFR stabilization
-│       ├── batch.py          # Batch processing runner for raw folders
-│       ├── import_frames.py  # Dataset importer for folder-based image structures (e.g., DAVIS)
-│       ├── color_utils.py    # Standardized RGB <-> LAB conversions
-│       ├── datasets.py       # FrameDataset implementation
-│       ├── clips.py          # ClipDataset implementation
-│       ├── degrade.py        # Synthetic old-film damage generation
-│       ├── splits.py         # Video/scene train-val-test split generation
-│       ├── apply_splits.py   # Rebuild splits from JSON specifications
-│       ├── reconstruct.py    # Preprocessing and full-res color assembly
-│       └── stream.py         # Memory-efficient chunked video stream reader
-├── configs/                  # Pipeline configurations (default.yaml, splits_davis.json)
-├── scripts/                  # Visual and numeric validation scripts
-├── tests/                    # Pytest suite
-└── data/                     # Ignored in git (raw, interim, processed, external, splits)
+## Project structure
 
 ```
----
-
-## Known Limitations
-
-* **Chrominance Resolution:** The color model outputs $ab$ tensors at reduced resolution (typically $\approx 256 \times 256$), which are subsequently bilinearly upscaled to original resolution during frame reconstruction. While original edge sharpness is preserved by using the native high-resolution $L$ channel, subtle color boundaries may exhibit slight softness on high-resolution targets.
-
+src/cvpipe/
+  ingest.py        read video details (ffprobe)
+  scenes.py        find scene cuts
+  extract.py       save frames + manifest
+  normalize.py     fix interlaced / variable-fps video
+  batch.py         process a whole folder of videos
+  import_frames.py import datasets stored as image folders (DAVIS)
+  color_utils.py   RGB <-> LAB and normalization
+  datasets.py      FrameDataset
+  clips.py         ClipDataset
+  degrade.py       old-film damage effects
+  splits.py        create train/val/test splits
+  apply_splits.py  rebuild splits from the committed list
+  reconstruct.py   model input prep and output reconstruction
+  stream.py        read long videos in chunks
+configs/           default.yaml, splits_davis.json
+scripts/           check_*.py: quick visual and numeric sanity checks
+tests/             pytest tests
+data/              not in git (raw, interim, processed, external, splits)
 ```
 
-```
+## Status
+
+**Done and tested:** video ingest, scene detection, frame extraction, LAB conversion
+(8 tests), frame and clip datasets, film degradations, splits, reconstruction,
+streaming, DAVIS import.
+
+## Known limitation
+
+The model predicts `ab` at about 256 px, and the result is enlarged afterwards, so
+color edges are slightly softer than the sharp original brightness.
